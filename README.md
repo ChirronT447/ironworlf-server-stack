@@ -1,2 +1,2 @@
-# ironworlf-server-stack
+# ironwolf-server-stack
 Scripts to setup server
