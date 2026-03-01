@@ -4,14 +4,14 @@
 IRONWOLF="/mnt/ironwolf"
 NVME_STACK="$HOME/server-stack"
 USER_NAME=$(whoami)
-STEAM_PASS="your_secure_password" # Change this!
+STEAM_PASS="your_secure_password" # Change this before running!
 
 echo "🚀 Starting the HP Pro Mini Ultimate Setup..."
 
 # 1. System Update & Drivers (GPU + DVB-T)
 echo "📦 Updating system and installing drivers..."
 sudo apt update && sudo apt upgrade -y
-sudo apt install -y curl intel-gpu-tools mesa-va-drivers intel-media-va-driver-non-free dvb-tools
+sudo apt install -y curl intel-gpu-tools mesa-va-drivers intel-media-va-driver-non-free dvb-tools jq
 
 # Fix for Sweex DVB-T (Firmware Download)
 sudo wget -O /lib/firmware/dvb-usb-rtl2832-02.fw https://github.com/OpenELEC/dvb-firmware/raw/master/firmware/dvb-usb-rtl2832-02.fw
@@ -64,8 +64,8 @@ services:
     volumes:
       - $NVME_STACK/steam-config:/home/steam/.local/share/Steam
       - $IRONWOLF/steam-library:/home/steam/SteamLibrary
-      - /dev/input:/dev/input:ro # <-- Let the container see gamepads
-      - /run/udev:/run/udev:ro   # <-- Let the container see when gamepads are plugged in
+      - /dev/input:/dev/input:ro # Hardware Gamepad passthrough
+      - /run/udev:/run/udev:ro   # Hot-plugging detection
     restart: unless-stopped
 
   # PHOTOS: Immich
@@ -78,7 +78,7 @@ services:
       - /etc/localtime:/etc/localtime:ro
     env_file: [.env]
     ports: ["2283:3001"]
-    depends_on: [database, redis]
+    depends_on: [database, valkey]
     restart: unless-stopped
 
   immich-machine-learning:
@@ -98,9 +98,9 @@ services:
     volumes: ["$NVME_STACK/immich-db:/var/lib/postgresql/data"]
     restart: unless-stopped
 
-  redis:
-    image: registry.hub.docker.com/library/redis:6.2-alpine
-    container_name: immich_redis
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: immich_valkey
     restart: unless-stopped
 
   # MEDIA: Jellyfin
@@ -142,7 +142,7 @@ services:
     restart: unless-stopped
 EOF
 
-# 6. Generate Unified Maintenance & Rollback Script
+# 6. Generate Maintenance & Rollback Script
 echo "🛠️ Creating maintain.sh..."
 cat <<EOF > $NVME_STACK/maintain.sh
 #!/bin/bash
@@ -199,10 +199,48 @@ esac
 EOF
 chmod +x $NVME_STACK/maintain.sh
 
-# 7. Create Systemd Services (Shutdown Backup & Startup Check)
-echo "⚙️ Configuring Systemd Services..."
+# 7. Generate Gaming Mode Toggle Script
+echo "🎮 Creating gaming-mode.sh..."
+cat <<EOF > $NVME_STACK/gaming-mode.sh
+#!/bin/bash
+case "\$1" in
+    on)
+        echo "🎮 Activating Gaming Mode..."
+        echo "Pausing background hogs (Immich, Jellyfin, Tvheadend)..."
+        docker pause immich_server immich_ml jellyfin tvheadend
+        echo "✅ GPU is now completely dedicated to Steam!"
+        ;;
+    off)
+        echo "🛑 Deactivating Gaming Mode..."
+        echo "Waking up background apps..."
+        docker unpause immich_server immich_ml jellyfin tvheadend
+        echo "✅ Media and photo backups are active again."
+        ;;
+    *)
+        echo "Usage: ./gaming-mode.sh {on|off}"
+        ;;
+esac
+EOF
+chmod +x $NVME_STACK/gaming-mode.sh
 
-# Service 1: Maintenance on Shutdown
+# 8. Install GE-Proton for Steam
+echo "🎮 Fetching the latest GE-Proton for Steam compatibility..."
+PROTON_DIR="$NVME_STACK/steam-config/compatibilitytools.d"
+mkdir -p "$PROTON_DIR"
+
+# Fetch the latest release download URL from GitHub API
+GE_URL=$(curl -s https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest | jq -r '.assets[] | select(.name | endswith(".tar.gz")) | .browser_download_url')
+
+if [ -n "$GE_URL" ]; then
+    echo "Downloading and extracting GE-Proton..."
+    curl -sL "$GE_URL" | tar -xz -C "$PROTON_DIR"
+    echo "✅ GE-Proton successfully installed."
+else
+    echo "⚠️ Could not automatically fetch GE-Proton. You can add it manually later."
+fi
+
+# 9. Create Systemd Services (Shutdown Backup & Startup Check)
+echo "⚙️ Configuring Systemd Services..."
 sudo cat <<EOF > /etc/systemd/system/maintenance-on-shutdown.service
 [Unit]
 Description=Backup and Update Pull on Shutdown
@@ -220,7 +258,6 @@ User=$USER_NAME
 WantedBy=multi-user.target
 EOF
 
-# Service 2: Check for updates on Startup
 sudo cat <<EOF > /etc/systemd/system/stack-check.service
 [Unit]
 Description=Check for Docker Stack Updates on Startup
@@ -242,24 +279,8 @@ sudo systemctl daemon-reload
 sudo systemctl enable maintenance-on-shutdown.service
 sudo systemctl enable stack-check.service
 
-# 8. Install GE-Proton for Steam
-echo "🎮 Fetching the latest GE-Proton for Steam compatibility..."
-PROTON_DIR="$NVME_STACK/steam-config/compatibilitytools.d"
-mkdir -p "$PROTON_DIR"
-
-# Fetch the latest release download URL from GitHub API
-GE_URL=$(curl -s https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest | grep "browser_download_url" | grep "\.tar\.gz" | cut -d '"' -f 4)
-
-if [ -n "$GE_URL" ]; then
-    echo "Downloading and extracting GE-Proton..."
-    curl -sL "$GE_URL" | tar -xz -C "$PROTON_DIR"
-    echo "✅ GE-Proton successfully installed."
-else
-    echo "⚠️ Could not automatically fetch GE-Proton. You can add it manually later."
-fi
-
 echo "----------------------------------------------------"
 echo "✅ ALL SET! Your ultimate stack script has finished."
 echo "1. Log out and log back in (so Docker permissions take effect)."
 echo "2. Run: cd $NVME_STACK && docker compose up -d"
-echo "3. Access your apps at your server's IP address."
+echo "3. Remember to run './gaming-mode.sh on' before you game!"
